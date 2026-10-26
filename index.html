@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulasi Monte Carlo: Profit Ritel</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#5d6677;--line:#d9dde5;--acc:#2f6fdb}
+@media (prefers-color-scheme:dark){:root{--bg:#14171d;--card:#1d222b;--fg:#e8ebf1;--mut:#9aa3b2;--line:#323946;--acc:#6aa0ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 14px 40px}
+h1{font-size:1.5rem;margin:0 0 4px}h2{font-size:1.1rem;margin:0 0 10px}
+.sub{color:var(--mut);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+label{display:block;font-size:.85rem;color:var(--mut);margin-bottom:3px}
+input{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+button{margin-top:14px;padding:10px 18px;border:0;border-radius:6px;background:var(--acc);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.m{border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.m b{display:block;font-size:1.4rem}.m span{color:var(--mut);font-size:.82rem}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+canvas{width:100%;height:300px;display:block}
+.err{color:#d33;font-weight:600}.note{color:var(--mut);font-size:.82rem}
+#out{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Simulasi Monte Carlo: Prediksi Profit Ritel</h1>
+<p class="sub">TA-03 Pemodelan dan Simulasi. Data: Supermarket Sales (Kaggle). Seluruh perhitungan berjalan di browser Anda, file tidak diunggah ke server.</p>
+
+<div class="card">
+<h2>Pengaturan</h2>
+<div class="grid">
+<div><label for="f">File CSV Supermarket Sales</label><input id="f" type="file" accept=".csv"></div>
+<div><label for="seed">Seed (NIM)</label><input id="seed" type="number" value="301240056"></div>
+<div><label for="ns">Jumlah skenario (1.000 - 100.000)</label><input id="ns" type="number" value="10000" min="1000" max="100000"></div>
+<div><label for="mg">Asumsi margin profit (%)</label><input id="mg" type="number" value="10" min="1" max="50" step="0.5"></div>
+<div><label for="tf">Target (x rata-rata profit historis)</label><input id="tf" type="number" value="1.05" min="0.5" max="2" step="0.01"></div>
+</div>
+<button id="go">Jalankan simulasi</button>
+<p id="err" class="err"></p>
+</div>
+
+<div id="out">
+<div class="card"><h2>1. Data dan parameter</h2><p id="clean" class="note"></p><div class="scroll" id="par"></div>
+<canvas id="c1"></canvas><canvas id="c2"></canvas></div>
+<div class="card"><h2>2. Pola bulanan historis</h2><div class="scroll" id="mon"></div></div>
+<div class="card"><h2>3. Hasil simulasi dan analisis risiko</h2>
+<div class="grid" id="met"></div><canvas id="c3" style="margin-top:12px"></canvas>
+<h2 style="margin-top:14px">Sensitivitas target</h2><div class="scroll" id="sen"></div>
+<p class="note">Asumsi: margin profit ditentukan pengguna, transaksi saling bebas, data hanya tiga bulan. Generator acak di browser berbeda dari NumPy, sehingga angka detail bisa sedikit berbeda dari notebook Python, tetapi hasil statistiknya setara.</p></div>
+</div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const fmt=(x,d=2)=>x.toLocaleString('id-ID',{minimumFractionDigits:d,maximumFractionDigits:d});
+let rand,spare=null;
+
+function parseCSV(t){
+  t=t.replace(/^\uFEFF/,'');const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<t.length;i++){const c=t[i];
+    if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++;}else q=false;}else f+=c;}
+    else if(c=='"')q=true;
+    else if(c==','){row.push(f);f='';}
+    else if(c=='\n'||c=='\r'){if(c=='\r'&&t[i+1]=='\n')i++;row.push(f);f='';if(row.length>1||row[0]!=='')rows.push(row);row=[];}
+    else f+=c;}
+  if(f!==''||row.length){row.push(f);rows.push(row);}
+  return rows;}
+function parseDate(s){s=s.trim();let m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if(m)return m[3]+'-'+m[1].padStart(2,'0');
+  m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);if(m)return m[1]+'-'+m[2].padStart(2,'0');return null;}
+const qt=(s,p)=>{const pos=(s.length-1)*p,lo=Math.floor(pos),fr=pos-lo;return s[lo]+(s[Math.min(lo+1,s.length-1)]-s[lo])*fr;};
+const mean=a=>a.reduce((x,y)=>x+y,0)/a.length;
+const sd=a=>{const m=mean(a);return Math.sqrt(a.reduce((x,y)=>x+(y-m)*(y-m),0)/(a.length-1));};
+const erf=x=>{const s=Math.sign(x);x=Math.abs(x);const t=1/(1+0.3275911*x);
+  return s*(1-(((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*Math.exp(-x*x));};
+function ks(x,cdf){const s=[...x].sort((a,b)=>a-b),n=s.length;let d=0;
+  for(let i=0;i<n;i++){const F=cdf(s[i]);d=Math.max(d,(i+1)/n-F,F-i/n);}return d;}
+function pilih(x){const m=mean(x),s=sd(x),lo=Math.min(...x),hi=Math.max(...x);
+  const kn=ks(x,v=>0.5*(1+erf((v-m)/(s*Math.SQRT2)))),ku=ks(x,v=>(v-lo)/(hi-lo));
+  return{dist:ku<kn?'uniform':'normal',kn,ku,mu:m,sd:s,lo,hi};}
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function randn(){if(spare!==null){const s=spare;spare=null;return s;}
+  let u=0;while(u===0)u=rand();const v=rand(),r=Math.sqrt(-2*Math.log(u)),a=2*Math.PI*v;spare=r*Math.sin(a);return r*Math.cos(a);}
+function draw(P){
+  if(P.dist==='normal'){let v=P.mu+P.sd*randn();v=v<P.lo?P.lo:v>P.hi?P.hi:v;return P.int?Math.round(v):v;}
+  return P.int?P.lo+Math.floor(rand()*(P.hi-P.lo+1)):P.lo+rand()*(P.hi-P.lo);}
+
+function hist(cv,data,edges,color,vl,xl){
+  const dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+  cv.width=W*dpr;cv.height=H*dpr;const g=cv.getContext('2d');g.scale(dpr,dpr);
+  const css=getComputedStyle(document.documentElement),fg=css.getPropertyValue('--fg').trim(),gr=css.getPropertyValue('--line').trim();
+  const nb=edges.length-1,cnt=new Array(nb).fill(0),span=edges[nb]-edges[0];
+  for(const v of data){let b=Math.floor((v-edges[0])/span*nb);if(b>=nb)b=nb-1;if(b>=0)cnt[b]++;}
+  const L=48,R=10,T=26,B=40,pw=W-L-R,ph=H-T-B,mx=Math.max(...cnt)*1.08,x2=v=>L+(v-edges[0])/span*pw;
+  g.font='11px system-ui,sans-serif';g.strokeStyle=gr;g.fillStyle=fg;g.textAlign='right';
+  for(let i=0;i<=4;i++){const y=T+ph-ph*i/4;g.beginPath();g.moveTo(L,y);g.lineTo(W-R,y);g.stroke();g.fillText(Math.round(mx*i/4),L-6,y+4);}
+  for(let i=0;i<nb;i++){g.fillStyle=color(edges[i]);const x=x2(edges[i]),w=x2(edges[i+1])-x,h=ph*cnt[i]/mx;g.fillRect(x+0.5,T+ph-h,Math.max(w-1,1),h);}
+  g.fillStyle=fg;g.textAlign='center';
+  for(let i=0;i<=5;i++){const v=edges[0]+span*i/5;g.fillText(fmt(v,span>20?0:1),x2(v),H-22);}
+  g.fillText(xl,L+pw/2,H-6);
+  let lx=L;(vl||[]).forEach(l=>{g.strokeStyle=l.c;g.lineWidth=2;g.setLineDash(l.d?[6,4]:[]);const x=x2(l.v);
+    g.beginPath();g.moveTo(x,T);g.lineTo(x,T+ph);g.stroke();g.setLineDash([]);g.lineWidth=1;
+    g.fillStyle=l.c;g.textAlign='left';g.fillText(l.t,lx,14);lx+=g.measureText(l.t).width+22;});
+}
+const table=(h,r)=>'<table><tr>'+h.map(x=>'<th>'+x+'</th>').join('')+'</tr>'+r.map(a=>'<tr>'+a.map(x=>'<td>'+x+'</td>').join('')+'</tr>').join('')+'</table>';
+const card=(t,v)=>'<div class="m"><b>'+v+'</b><span>'+t+'</span></div>';
+
+function jalankan(text){
+  const r=parseCSV(text),h=r[0].map(x=>x.trim().toLowerCase());
+  const ip=h.indexOf('unit price'),iq=h.indexOf('quantity'),id=h.indexOf('date');
+  if(ip<0||iq<0||id<0)throw new Error('Kolom wajib tidak lengkap. Dibutuhkan: Unit price, Quantity, Date.');
+  const raw=r.slice(1),seen=new Set();let rows=[];
+  for(const x of raw){const k=x.join('\u0001');if(seen.has(k))continue;seen.add(k);
+    const p=parseFloat(x[ip]),q=parseFloat(x[iq]),m=parseDate(x[id]||'');
+    if(isFinite(p)&&isFinite(q)&&m)rows.push({p,q,m});}
+  const n1=rows.length;
+  const iqr=a=>{const s=[...a].sort((x,y)=>x-y),q1=qt(s,.25),q3=qt(s,.75),i=q3-q1;return[q1-3*i,q3+3*i];};
+  const [pl,ph]=iqr(rows.map(x=>x.p)),[ql,qh]=iqr(rows.map(x=>x.q));
+  rows=rows.filter(x=>x.p>=pl&&x.p<=ph&&x.q>=ql&&x.q<=qh);
+  if(rows.length<30)throw new Error('Data terlalu sedikit setelah cleaning.');
+  const nS=Math.min(100000,Math.max(1000,parseInt($('#ns').value)||10000));
+  const mg=(parseFloat($('#mg').value)||10)/100,tf=parseFloat($('#tf').value)||1.05;
+  $('#clean').textContent='Baris awal: '+raw.length+' | dibuang (duplikat/kosong): '+(raw.length-n1)+' | dibuang (outlier): '+(n1-rows.length)+' | baris dipakai: '+rows.length;
+
+  const pr=rows.map(x=>x.p),qy=rows.map(x=>x.q),PP=pilih(pr),PQ=pilih(qy);PP.int=false;PQ.int=true;
+  $('#par').innerHTML=table(['Variabel','Mean','Std Dev','Min','Max','KS Normal','KS Uniform','Distribusi'],
+   [['Unit price',fmt(PP.mu,4),fmt(PP.sd,4),fmt(PP.lo),fmt(PP.hi),fmt(PP.kn,4),fmt(PP.ku,4),PP.dist],
+    ['Quantity',fmt(PQ.mu,4),fmt(PQ.sd,4),fmt(PQ.lo,0),fmt(PQ.hi,0),fmt(PQ.kn,4),fmt(PQ.ku,4),PQ.dist]]);
+  $('#out').style.display='block';
+  const e1=Array.from({length:31},(_,i)=>PP.lo+(PP.hi-PP.lo)*i/30);
+  const e2=Array.from({length:PQ.hi-PQ.lo+2},(_,i)=>PQ.lo-0.5+i);
+  hist($('#c1'),pr,e1,()=>'#5aa9d6',[],'Unit price (data asli)');
+  hist($('#c2'),qy,e2,()=>'#7cc67c',[],'Quantity (data asli)');
+
+  const bm={};for(const x of rows){(bm[x.m]=bm[x.m]||{n:0,s:0});bm[x.m].n++;bm[x.m].s+=x.p*x.q;}
+  const ks_=Object.keys(bm).sort(),nTx=Math.round(mean(ks_.map(k=>bm[k].n)));
+  const hist_=mean(ks_.map(k=>bm[k].s*mg)),target=tf*hist_;
+  $('#mon').innerHTML=table(['Bulan','Transaksi','Penjualan','Profit'],ks_.map(k=>[k,bm[k].n,fmt(bm[k].s),fmt(bm[k].s*mg)]))+
+   '<p class="note">Rata-rata transaksi per bulan: '+nTx+' | rata-rata profit historis: '+fmt(hist_)+' | target: '+fmt(target)+'</p>';
+
+  rand=mulberry32((parseInt($('#seed').value)||1)>>>0);spare=null;
+  const sim=new Float64Array(nS);
+  for(let s=0;s<nS;s++){let t=0;for(let j=0;j<nTx;j++)t+=draw(PP)*draw(PQ);sim[s]=t*mg;}
+  const arr=Array.from(sim),sorted=[...arr].sort((a,b)=>a-b),mu=mean(arr),pc=arr.filter(v=>v>=target).length/nS;
+  $('#met').innerHTML=card('P(profit ≥ target)',fmt(pc*100)+'%')+card('Risiko (profit < target)',fmt((1-pc)*100)+'%')+
+   card('Rata-rata profit simulasi',fmt(mu))+card('Std dev profit simulasi',fmt(sd(arr)))+
+   card('Rentang 90% (P5 - P95)',fmt(qt(sorted,.05),0)+' - '+fmt(qt(sorted,.95),0))+card('Rata-rata profit historis',fmt(hist_));
+  const lo=sorted[0],hi=sorted[nS-1],e3=Array.from({length:51},(_,i)=>lo+(hi-lo)*i/50);
+  hist($('#c3'),arr,e3,v=>v<target?'#e8786b':'#5aa9d6',
+   [{v:target,c:'#d33',d:1,t:'Target = '+fmt(target,0)},{v:mu,c:'#2a9d4a',t:'Rata-rata simulasi = '+fmt(mu,0)}],'Profit bulanan ('+nS.toLocaleString('id-ID')+' skenario)');
+  $('#sen').innerHTML=table(['Faktor target','Target profit','P(profit ≥ target)'],
+   [.9,.95,1,1.05,1.1,1.15].map(f=>[f.toFixed(2),fmt(f*hist_),fmt(arr.filter(v=>v>=f*hist_).length/nS,4)]));
+  $('#out').scrollIntoView({behavior:'smooth'});
+}
+$('#go').onclick=()=>{
+  $('#err').textContent='';const f=$('#f').files[0];
+  if(!f){$('#err').textContent='Pilih file CSV terlebih dahulu.';return;}
+  const rd=new FileReader();
+  rd.onload=()=>{try{jalankan(rd.result);}catch(e){$('#err').textContent=e.message;}};
+  rd.readAsText(f);
+};
+</script>
+</body>
+</html>
